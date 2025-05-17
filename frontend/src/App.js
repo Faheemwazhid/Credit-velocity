@@ -29,6 +29,9 @@ function App() {
   const [monthlyPayment, setMonthlyPayment] = useState(0);
   const [extraPaymentAmount, setExtraPaymentAmount] = useState(0);
   const [locChunkSize, setLocChunkSize] = useState(10000);
+  
+  // Added paycheck parking option
+  const [paycheckParking, setPaycheckParking] = useState(false);
 
   // Results for each strategy
   const [traditionalResults, setTraditionalResults] = useState({ totalInterest: 0, totalPayments: 0, payoffMonths: 0 });
@@ -195,12 +198,44 @@ function App() {
       const principalForMonth = Math.min(basePayment - mortgageInterestForMonth, remainingBalance);
       remainingBalance = Math.max(0, remainingBalance - principalForMonth);
       totalInterest += mortgageInterestForMonth;
-      cashFlowRemaining -= (mortgageInterestForMonth + principalForMonth);
       
-      // Pay down LOC with remaining cash flow
-      const locPayment = Math.min(locBalance + locInterestForMonth, cashFlowRemaining);
-      const locPrincipalPayment = Math.max(0, locPayment - locInterestForMonth);
-      locBalance = Math.max(0, locBalance + locInterestForMonth - locPayment);
+      let locPayment = 0;
+      let locPrincipalPayment = 0;
+      let locDraw = 0;
+      
+      // Handle different LOC strategies
+      if (paycheckParking) {
+        // Paycheck Parking Strategy
+        // 1. Deposit entire paycheck to LOC (reduces LOC balance)
+        locPrincipalPayment = monthlyIncome;
+        
+        // 2. Draw living expenses from LOC
+        locDraw = monthlyExpenses;
+        
+        // 3. Draw mortgage payment from LOC if needed
+        locDraw += (mortgageInterestForMonth + principalForMonth);
+        
+        // Calculate net effect on LOC
+        locPayment = Math.max(0, locPrincipalPayment - locDraw);
+        
+        // If we need to draw more than we deposit, increase LOC balance
+        if (locDraw > locPrincipalPayment) {
+          const additionalDraw = locDraw - locPrincipalPayment;
+          locBalance = Math.min(locLimit, locBalance + additionalDraw);
+        } else {
+          // Otherwise reduce LOC balance
+          locBalance = Math.max(0, locBalance + locInterestForMonth - locPayment);
+        }
+      } else {
+        // Regular Extra Payment Strategy
+        cashFlowRemaining -= (mortgageInterestForMonth + principalForMonth);
+        
+        // Pay down LOC with remaining cash flow
+        locPayment = Math.min(locBalance + locInterestForMonth, cashFlowRemaining);
+        locPrincipalPayment = Math.max(0, locPayment - locInterestForMonth);
+        locBalance = Math.max(0, locBalance + locInterestForMonth - locPayment);
+      }
+      
       locInterest += locInterestForMonth;
       
       // Record if we're applying a new chunk this month
@@ -215,20 +250,26 @@ function App() {
       
       balanceByMonth.push(remainingBalance);
       
-      // Add to amortization schedule
+      // Add to amortization schedule in format matching the image
       schedule.push({
-        month: month,
-        mortgagePayment: mortgageInterestForMonth + principalForMonth,
-        mortgagePrincipal: principalForMonth,
-        mortgageInterest: mortgageInterestForMonth,
-        mortgageBalance: remainingBalance,
+        pmtNo: month,
+        date: getDateAfterMonths(month),
+        payment: basePayment,
+        interest: mortgageInterestForMonth,
+        principalPaid: principalForMonth,
+        balance: remainingBalance,
+        rate: locInterestRate,
         locPayment: locPayment,
-        locPrincipal: locPrincipalPayment,
-        locInterest: locInterestForMonth,
+        draw: locDraw,
+        interestToMrtg: mortgageInterestForMonth,
+        interestAccrued: locInterestForMonth,
+        interestPaid: locInterestForMonth > locPayment ? locPayment : locInterestForMonth,
+        locPrinBalance: locBalance + locInterestForMonth,
+        locPaid: locPrincipalPayment,
         locBalance: locBalance,
+        totalOwed: remainingBalance + locBalance,
         chunkApplied: month === 1 ? chunkApplied : newChunkApplied,
-        totalInterest: totalInterest + locInterest,
-        date: getDateAfterMonths(month)
+        totalInterest: totalInterest + locInterest
       });
       
       month++;
@@ -355,7 +396,7 @@ function App() {
         },
       ],
     });
-  }, [loanAmount, interestRate, loanTerm, monthlyIncome, monthlyExpenses, locLimit, locInterestRate, locChunkSize]);
+  }, [loanAmount, interestRate, loanTerm, monthlyIncome, monthlyExpenses, locLimit, locInterestRate, locChunkSize, paycheckParking]);
 
   // Pagination Component
   const PaginationControls = ({ schedule }) => {
@@ -632,6 +673,25 @@ function App() {
                 onChange={(e) => setLocChunkSize(Number(e.target.value))}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
               />
+            </div>
+            
+            {/* Added paycheck parking option */}
+            <div className="mt-4 pt-4 border-t border-gray-200">
+              <div className="flex items-center">
+                <input
+                  id="paycheckParking"
+                  type="checkbox"
+                  checked={paycheckParking}
+                  onChange={(e) => setPaycheckParking(e.target.checked)}
+                  className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                />
+                <label htmlFor="paycheckParking" className="ml-2 block text-sm text-gray-700">
+                  Enable Paycheck Parking
+                </label>
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                When enabled, your entire paycheck is applied to the LOC, and expenses are withdrawn from the LOC.
+              </p>
             </div>
           </div>
         </div>
@@ -1066,10 +1126,14 @@ function App() {
                   The LOC strategy (also known as Velocity Banking) involves using a line of credit to make 
                   large lump sum payments on your mortgage, then aggressively paying down the LOC with your monthly income.
                 </p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
                   <div className="bg-red-50 p-4 rounded-lg">
                     <p className="text-sm text-gray-600">Chunk Size</p>
                     <p className="text-2xl font-bold text-red-600">${locChunkSize.toFixed(2)}</p>
+                  </div>
+                  <div className="bg-red-50 p-4 rounded-lg">
+                    <p className="text-sm text-gray-600">LOC Interest Rate</p>
+                    <p className="text-2xl font-bold text-red-600">{locInterestRate.toFixed(2)}%</p>
                   </div>
                   <div className="bg-red-50 p-4 rounded-lg">
                     <p className="text-sm text-gray-600">Total Interest</p>
@@ -1085,6 +1149,50 @@ function App() {
                   <p className="text-2xl font-bold text-blue-600">
                     ${(traditionalResults.totalInterest - locResults.totalInterest).toFixed(2)}
                   </p>
+                </div>
+                <div className="bg-yellow-50 p-4 rounded-lg mb-6">
+                  <h3 className="text-lg font-semibold text-gray-800 mb-2">LOC Strategy Method</h3>
+                  <div className="flex items-center mb-3">
+                    <div className={`mr-4 flex items-center ${paycheckParking ? 'font-semibold text-blue-600' : ''}`}>
+                      <input 
+                        type="radio" 
+                        id="paycheckParkingOn" 
+                        name="locMethod" 
+                        checked={paycheckParking} 
+                        onChange={() => setPaycheckParking(true)}
+                        className="mr-2"
+                      />
+                      <label htmlFor="paycheckParkingOn">Paycheck Parking</label>
+                    </div>
+                    <div className={`flex items-center ${!paycheckParking ? 'font-semibold text-blue-600' : ''}`}>
+                      <input 
+                        type="radio" 
+                        id="paycheckParkingOff" 
+                        name="locMethod" 
+                        checked={!paycheckParking} 
+                        onChange={() => setPaycheckParking(false)}
+                        className="mr-2"
+                      />
+                      <label htmlFor="paycheckParkingOff">Free Cash Flow</label>
+                    </div>
+                  </div>
+                  <div>
+                    {paycheckParking ? (
+                      <ol className="list-decimal list-inside space-y-2 text-gray-700">
+                        <li>Take a chunk from your Line of Credit and apply it to your mortgage principal</li>
+                        <li>Deposit your entire paycheck to your LOC each month (reduces LOC balance)</li>
+                        <li>Draw your living expenses and mortgage payment from the LOC</li>
+                        <li>Once the LOC is paid off, take another chunk and repeat the process</li>
+                      </ol>
+                    ) : (
+                      <ol className="list-decimal list-inside space-y-2 text-gray-700">
+                        <li>Take a chunk from your Line of Credit and apply it to your mortgage principal</li>
+                        <li>Make your regular mortgage payment each month</li>
+                        <li>Use your remaining cash flow to aggressively pay down the LOC</li>
+                        <li>Once the LOC is paid off, take another chunk and repeat the process</li>
+                      </ol>
+                    )}
+                  </div>
                 </div>
               </div>
               <div className="h-80 mb-6">
@@ -1146,47 +1254,41 @@ function App() {
                 />
               </div>
               
-              {/* LOC Strategy Explanation */}
-              <div className="bg-yellow-50 p-4 rounded-lg mb-6">
-                <h3 className="text-lg font-semibold text-gray-800 mb-2">How the LOC Strategy Works</h3>
-                <ol className="list-decimal list-inside space-y-2 text-gray-700">
-                  <li>Take a chunk from your Line of Credit and apply it to your mortgage principal</li>
-                  <li>Make your regular mortgage payment each month</li>
-                  <li>Use your remaining cash flow to aggressively pay down the LOC</li>
-                  <li>Once the LOC is paid off, take another chunk and repeat the process</li>
-                </ol>
-                <p className="mt-3 text-sm text-gray-600">
-                  <b>Note:</b> The table below shows when chunks are applied (marked with ✓ in the "Chunk Applied" column).
-                </p>
-              </div>
-              
-              {/* Simplified Amortization Schedule */}
-              <h3 className="text-lg font-semibold text-gray-800 mb-3">Simplified LOC Schedule</h3>
+              {/* LOC Amortization Schedule */}
+              <h3 className="text-lg font-semibold text-gray-800 mb-3">LOC Amortization Schedule</h3>
               <div className="overflow-x-auto">
                 <table className="min-w-full bg-white border border-gray-200">
                   <thead>
-                    <tr className="bg-gray-100">
-                      <th className="py-2 px-4 border-b">Month</th>
-                      <th className="py-2 px-4 border-b">Date</th>
-                      <th className="py-2 px-4 border-b">Chunk Applied</th>
-                      <th className="py-2 px-4 border-b">Mortgage Balance</th>
-                      <th className="py-2 px-4 border-b">LOC Balance</th>
-                      <th className="py-2 px-4 border-b">Total Interest</th>
-                      <th className="py-2 px-4 border-b">Combined Debt</th>
+                    <tr className="bg-gray-100 text-sm">
+                      <th className="py-2 px-3 border-b">Pmt No.</th>
+                      <th className="py-2 px-3 border-b">Date</th>
+                      <th className="py-2 px-3 border-b">Payment</th>
+                      <th className="py-2 px-3 border-b">Interest</th>
+                      <th className="py-2 px-3 border-b">Principal Paid</th>
+                      <th className="py-2 px-3 border-b">Balance (Using LOC)</th>
+                      <th className="py-2 px-3 border-b">Rate</th>
+                      <th className="py-2 px-3 border-b">LOC Payment</th>
+                      <th className="py-2 px-3 border-b">Draw</th>
+                      <th className="py-2 px-3 border-b">LOC Balance</th>
+                      <th className="py-2 px-3 border-b">Total Owed</th>
+                      <th className="py-2 px-3 border-b">Chunk Applied</th>
                     </tr>
                   </thead>
                   <tbody>
                     {getPaginatedData(locSchedule).map((row, index) => (
                       <tr key={index} className={row.chunkApplied ? 'bg-green-50' : (index % 2 === 0 ? 'bg-white' : 'bg-gray-50')}>
-                        <td className="py-2 px-4 border-b text-center">{row.month}</td>
-                        <td className="py-2 px-4 border-b">{row.date}</td>
-                        <td className="py-2 px-4 border-b text-center">{row.chunkApplied ? '✓' : ''}</td>
-                        <td className="py-2 px-4 border-b">{formatCurrency(row.mortgageBalance)}</td>
-                        <td className="py-2 px-4 border-b">{formatCurrency(row.locBalance)}</td>
-                        <td className="py-2 px-4 border-b">{formatCurrency(row.totalInterest)}</td>
-                        <td className="py-2 px-4 border-b font-medium">
-                          {formatCurrency(row.mortgageBalance + row.locBalance)}
-                        </td>
+                        <td className="py-2 px-3 border-b text-center">{row.pmtNo}</td>
+                        <td className="py-2 px-3 border-b">{row.date}</td>
+                        <td className="py-2 px-3 border-b">{formatCurrency(row.payment)}</td>
+                        <td className="py-2 px-3 border-b">{formatCurrency(row.interest)}</td>
+                        <td className="py-2 px-3 border-b">{formatCurrency(row.principalPaid)}</td>
+                        <td className="py-2 px-3 border-b">{formatCurrency(row.balance)}</td>
+                        <td className="py-2 px-3 border-b">{row.rate}%</td>
+                        <td className="py-2 px-3 border-b">{formatCurrency(row.locPayment)}</td>
+                        <td className="py-2 px-3 border-b">{formatCurrency(row.draw)}</td>
+                        <td className="py-2 px-3 border-b">{formatCurrency(row.locBalance)}</td>
+                        <td className="py-2 px-3 border-b font-medium">{formatCurrency(row.totalOwed)}</td>
+                        <td className="py-2 px-3 border-b text-center">{row.chunkApplied ? '✓' : ''}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1199,7 +1301,7 @@ function App() {
               {/* Detailed LOC Amortization Schedule (Optional) */}
               <div className="mt-8">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-lg font-semibold text-gray-800">Detailed LOC Schedule</h3>
+                  <h3 className="text-lg font-semibold text-gray-800">Detailed LOC Information</h3>
                   <button 
                     onClick={() => {
                       const detailsTable = document.getElementById('detailedLocTable');
@@ -1215,36 +1317,26 @@ function App() {
                 <div id="detailedLocTable" className="overflow-x-auto hidden">
                   <table className="min-w-full bg-white border border-gray-200">
                     <thead>
-                      <tr className="bg-gray-100">
-                        <th className="py-2 px-4 border-b">Month</th>
-                        <th className="py-2 px-4 border-b">Date</th>
-                        <th className="py-2 px-4 border-b">Chunk Applied</th>
-                        <th className="py-2 px-4 border-b">Mortgage Payment</th>
-                        <th className="py-2 px-4 border-b">Mortgage Principal</th>
-                        <th className="py-2 px-4 border-b">Mortgage Interest</th>
-                        <th className="py-2 px-4 border-b">Mortgage Balance</th>
-                        <th className="py-2 px-4 border-b">LOC Payment</th>
-                        <th className="py-2 px-4 border-b">LOC Principal</th>
-                        <th className="py-2 px-4 border-b">LOC Interest</th>
-                        <th className="py-2 px-4 border-b">LOC Balance</th>
-                        <th className="py-2 px-4 border-b">Total Interest</th>
+                      <tr className="bg-gray-100 text-xs">
+                        <th className="py-2 px-2 border-b">Pmt No.</th>
+                        <th className="py-2 px-2 border-b">Interest to Mrtg</th>
+                        <th className="py-2 px-2 border-b">Interest Accrued</th>
+                        <th className="py-2 px-2 border-b">Interest Paid</th>
+                        <th className="py-2 px-2 border-b">LOC Prin. Balance</th>
+                        <th className="py-2 px-2 border-b">LOC Paid</th>
+                        <th className="py-2 px-2 border-b">Total Interest</th>
                       </tr>
                     </thead>
                     <tbody>
                       {getPaginatedData(locSchedule).map((row, index) => (
                         <tr key={index} className={row.chunkApplied ? 'bg-green-50' : (index % 2 === 0 ? 'bg-white' : 'bg-gray-50')}>
-                          <td className="py-2 px-4 border-b text-center">{row.month}</td>
-                          <td className="py-2 px-4 border-b">{row.date}</td>
-                          <td className="py-2 px-4 border-b text-center">{row.chunkApplied ? '✓' : ''}</td>
-                          <td className="py-2 px-4 border-b">{formatCurrency(row.mortgagePayment)}</td>
-                          <td className="py-2 px-4 border-b">{formatCurrency(row.mortgagePrincipal)}</td>
-                          <td className="py-2 px-4 border-b">{formatCurrency(row.mortgageInterest)}</td>
-                          <td className="py-2 px-4 border-b">{formatCurrency(row.mortgageBalance)}</td>
-                          <td className="py-2 px-4 border-b">{formatCurrency(row.locPayment)}</td>
-                          <td className="py-2 px-4 border-b">{formatCurrency(row.locPrincipal)}</td>
-                          <td className="py-2 px-4 border-b">{formatCurrency(row.locInterest)}</td>
-                          <td className="py-2 px-4 border-b">{formatCurrency(row.locBalance)}</td>
-                          <td className="py-2 px-4 border-b">{formatCurrency(row.totalInterest)}</td>
+                          <td className="py-2 px-2 border-b text-center">{row.pmtNo}</td>
+                          <td className="py-2 px-2 border-b">{formatCurrency(row.interestToMrtg)}</td>
+                          <td className="py-2 px-2 border-b">{formatCurrency(row.interestAccrued)}</td>
+                          <td className="py-2 px-2 border-b">{formatCurrency(row.interestPaid)}</td>
+                          <td className="py-2 px-2 border-b">{formatCurrency(row.locPrinBalance)}</td>
+                          <td className="py-2 px-2 border-b">{formatCurrency(row.locPaid)}</td>
+                          <td className="py-2 px-2 border-b">{formatCurrency(row.totalInterest)}</td>
                         </tr>
                       ))}
                     </tbody>
