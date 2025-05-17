@@ -35,6 +35,15 @@ function App() {
   const [extraPaymentResults, setExtraPaymentResults] = useState({ totalInterest: 0, totalPayments: 0, payoffMonths: 0 });
   const [locResults, setLocResults] = useState({ totalInterest: 0, totalPayments: 0, payoffMonths: 0 });
   
+  // Amortization schedules
+  const [traditionalSchedule, setTraditionalSchedule] = useState([]);
+  const [extraPaymentSchedule, setExtraPaymentSchedule] = useState([]);
+  const [locSchedule, setLocSchedule] = useState([]);
+  
+  // State for managing paginated tables
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(12); // Show 1 year at a time
+  
   // Chart data
   const [balanceChartData, setBalanceChartData] = useState({
     labels: [],
@@ -54,7 +63,7 @@ function App() {
     return principal * (monthlyRate * Math.pow(1 + monthlyRate, numPayments)) / (Math.pow(1 + monthlyRate, numPayments) - 1);
   };
 
-  // Calculate results for traditional EMI payment
+  // Calculate results for traditional EMI payment with full amortization schedule
   const calculateTraditionalPayment = () => {
     const monthlyRate = interestRate / 100 / 12;
     const numPayments = loanTerm * 12;
@@ -63,26 +72,43 @@ function App() {
     let remainingBalance = loanAmount;
     let totalInterest = 0;
     let balanceByMonth = [loanAmount];
+    let schedule = [];
     
     for (let i = 1; i <= numPayments && remainingBalance > 0; i++) {
       const interestForMonth = remainingBalance * monthlyRate;
-      const principalForMonth = payment - interestForMonth;
+      const principalForMonth = Math.min(payment - interestForMonth, remainingBalance);
       
       remainingBalance = Math.max(0, remainingBalance - principalForMonth);
       totalInterest += interestForMonth;
       
       balanceByMonth.push(remainingBalance);
+      
+      // Add to amortization schedule
+      schedule.push({
+        month: i,
+        payment: payment,
+        principal: principalForMonth,
+        interest: interestForMonth,
+        totalInterest: totalInterest,
+        balance: remainingBalance,
+        date: getDateAfterMonths(i)
+      });
+      
+      // If we've paid off the loan, break
+      if (remainingBalance === 0) break;
     }
+    
+    setTraditionalSchedule(schedule);
     
     return {
       totalInterest,
       totalPayments: totalInterest + loanAmount,
-      payoffMonths: balanceByMonth.length - 1,
+      payoffMonths: schedule.length,
       balanceByMonth
     };
   };
 
-  // Calculate results for extra payment strategy
+  // Calculate results for extra payment strategy with full amortization schedule
   const calculateExtraPaymentStrategy = () => {
     const monthlyRate = interestRate / 100 / 12;
     const numPayments = loanTerm * 12;
@@ -92,29 +118,50 @@ function App() {
     let remainingBalance = loanAmount;
     let totalInterest = 0;
     let balanceByMonth = [loanAmount];
+    let schedule = [];
     
     for (let i = 1; i <= numPayments && remainingBalance > 0; i++) {
       const interestForMonth = remainingBalance * monthlyRate;
-      const principalForMonth = basePayment - interestForMonth;
-      const totalPaymentForMonth = basePayment + extraPayment;
-      const totalPrincipalForMonth = totalPaymentForMonth - interestForMonth;
+      const principalFromBase = Math.min(basePayment - interestForMonth, remainingBalance);
+      const principalFromExtra = Math.min(extraPayment, remainingBalance - principalFromBase);
+      const totalPrincipalForMonth = principalFromBase + principalFromExtra;
+      const totalPaymentForMonth = interestForMonth + totalPrincipalForMonth;
       
       remainingBalance = Math.max(0, remainingBalance - totalPrincipalForMonth);
       totalInterest += interestForMonth;
       
       balanceByMonth.push(remainingBalance);
+      
+      // Add to amortization schedule
+      schedule.push({
+        month: i,
+        basePayment: basePayment, 
+        extraPayment: extraPayment,
+        totalPayment: totalPaymentForMonth,
+        principalFromBase: principalFromBase,
+        principalFromExtra: principalFromExtra,
+        interest: interestForMonth,
+        totalInterest: totalInterest,
+        balance: remainingBalance,
+        date: getDateAfterMonths(i)
+      });
+      
+      // If we've paid off the loan, break
+      if (remainingBalance === 0) break;
     }
+    
+    setExtraPaymentSchedule(schedule);
     
     return {
       totalInterest,
       totalPayments: totalInterest + loanAmount,
-      payoffMonths: balanceByMonth.length - 1,
+      payoffMonths: schedule.length,
       balanceByMonth,
       extraPaymentAmount: extraPayment
     };
   };
 
-  // Calculate results for LOC chunking strategy
+  // Calculate results for LOC chunking strategy with full amortization schedule
   const calculateLocStrategy = () => {
     const monthlyRate = interestRate / 100 / 12;
     const locMonthlyRate = locInterestRate / 100 / 12;
@@ -127,12 +174,15 @@ function App() {
     let totalInterest = 0;
     let locInterest = 0;
     let balanceByMonth = [loanAmount];
+    let schedule = [];
     let month = 1;
+    let chunkApplied = false;
     
     // Apply initial chunk payment if possible
     if (locChunkSize <= locLimit) {
       remainingBalance -= locChunkSize;
       locBalance = locChunkSize;
+      chunkApplied = true;
     }
     
     while (month <= numPayments && (remainingBalance > 0 || locBalance > 0)) {
@@ -149,18 +199,42 @@ function App() {
       
       // Pay down LOC with remaining cash flow
       const locPayment = Math.min(locBalance + locInterestForMonth, cashFlowRemaining);
+      const locPrincipalPayment = Math.max(0, locPayment - locInterestForMonth);
       locBalance = Math.max(0, locBalance + locInterestForMonth - locPayment);
       locInterest += locInterestForMonth;
+      
+      // Record if we're applying a new chunk this month
+      let newChunkApplied = false;
       
       // Apply another chunk if LOC is paid off and there's room
       if (locBalance === 0 && remainingBalance > locChunkSize && locChunkSize <= locLimit) {
         remainingBalance -= locChunkSize;
         locBalance = locChunkSize;
+        newChunkApplied = true;
       }
       
       balanceByMonth.push(remainingBalance);
+      
+      // Add to amortization schedule
+      schedule.push({
+        month: month,
+        mortgagePayment: mortgageInterestForMonth + principalForMonth,
+        mortgagePrincipal: principalForMonth,
+        mortgageInterest: mortgageInterestForMonth,
+        mortgageBalance: remainingBalance,
+        locPayment: locPayment,
+        locPrincipal: locPrincipalPayment,
+        locInterest: locInterestForMonth,
+        locBalance: locBalance,
+        chunkApplied: month === 1 ? chunkApplied : newChunkApplied,
+        totalInterest: totalInterest + locInterest,
+        date: getDateAfterMonths(month)
+      });
+      
       month++;
     }
+    
+    setLocSchedule(schedule);
     
     return {
       totalInterest: totalInterest + locInterest,
@@ -168,6 +242,29 @@ function App() {
       payoffMonths: month - 1,
       balanceByMonth
     };
+  };
+  
+  // Helper function to get formatted date X months from now
+  const getDateAfterMonths = (months) => {
+    const date = new Date();
+    date.setMonth(date.getMonth() + months);
+    return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short' });
+  };
+  
+  // Pagination helpers
+  const totalPages = (scheduleLength) => Math.ceil(scheduleLength / rowsPerPage);
+  
+  const pageNumbers = (totalPages) => {
+    let pages = [];
+    for (let i = 1; i <= totalPages; i++) {
+      pages.push(i);
+    }
+    return pages;
+  };
+  
+  const getPaginatedData = (schedule) => {
+    const startIndex = (currentPage - 1) * rowsPerPage;
+    return schedule.slice(startIndex, startIndex + rowsPerPage);
   };
 
   // Update calculations when inputs change
@@ -260,13 +357,87 @@ function App() {
     });
   }, [loanAmount, interestRate, loanTerm, monthlyIncome, monthlyExpenses, locLimit, locInterestRate, locChunkSize]);
 
+  // Pagination Component
+  const PaginationControls = ({ schedule }) => {
+    const totalPagesCount = totalPages(schedule.length);
+    
+    return (
+      <div className="flex items-center justify-between mt-4 mb-2">
+        <div className="flex items-center">
+          <span className="text-sm text-gray-700 mr-2">
+            Rows per page:
+          </span>
+          <select 
+            className="border border-gray-300 rounded px-2 py-1 text-sm"
+            value={rowsPerPage}
+            onChange={(e) => {
+              setRowsPerPage(Number(e.target.value));
+              setCurrentPage(1); // Reset to first page when changing rows per page
+            }}
+          >
+            <option value={12}>12 (1 year)</option>
+            <option value={24}>24 (2 years)</option>
+            <option value={60}>60 (5 years)</option>
+            <option value={120}>120 (10 years)</option>
+          </select>
+        </div>
+        
+        <div className="flex items-center space-x-1">
+          <button
+            className={`px-3 py-1 rounded ${currentPage === 1 ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-blue-100 text-blue-700 hover:bg-blue-200'}`}
+            onClick={() => setCurrentPage(1)}
+            disabled={currentPage === 1}
+          >
+            First
+          </button>
+          <button
+            className={`px-3 py-1 rounded ${currentPage === 1 ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-blue-100 text-blue-700 hover:bg-blue-200'}`}
+            onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+            disabled={currentPage === 1}
+          >
+            Prev
+          </button>
+          
+          <span className="px-3 py-1 text-sm">
+            Page {currentPage} of {totalPagesCount}
+          </span>
+          
+          <button
+            className={`px-3 py-1 rounded ${currentPage === totalPagesCount ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-blue-100 text-blue-700 hover:bg-blue-200'}`}
+            onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPagesCount))}
+            disabled={currentPage === totalPagesCount}
+          >
+            Next
+          </button>
+          <button
+            className={`px-3 py-1 rounded ${currentPage === totalPagesCount ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-blue-100 text-blue-700 hover:bg-blue-200'}`}
+            onClick={() => setCurrentPage(totalPagesCount)}
+            disabled={currentPage === totalPagesCount}
+          >
+            Last
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // Format number as currency
+  const formatCurrency = (value) => {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(value);
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
       <header className="bg-gradient-to-r from-blue-900 to-blue-700 text-white py-8 shadow-md">
         <div className="container mx-auto px-4 flex flex-col md:flex-row items-center">
           <div className="md:w-1/2 mb-6 md:mb-0">
-            <h1 className="text-3xl md:text-4xl font-bold mb-2">Loan Velocity Optimizer</h1>
+            <h1 className="text-3xl md:text-4xl font-bold mb-2">Credit Velocity AI</h1>
             <p className="text-lg md:text-xl opacity-90">
               Compare mortgage payoff strategies and save thousands in interest
             </p>
@@ -661,7 +832,7 @@ function App() {
                   </div>
                 </div>
               </div>
-              <div className="h-80">
+              <div className="h-80 mb-6">
                 <Line 
                   data={{
                     labels: balanceChartData.labels,
@@ -718,6 +889,40 @@ function App() {
                   }}
                 />
               </div>
+              
+              {/* Amortization Schedule */}
+              <h3 className="text-lg font-semibold text-gray-800 mb-3">Amortization Schedule</h3>
+              <div className="overflow-x-auto">
+                <table className="min-w-full bg-white border border-gray-200">
+                  <thead>
+                    <tr className="bg-gray-100">
+                      <th className="py-2 px-4 border-b">Month</th>
+                      <th className="py-2 px-4 border-b">Date</th>
+                      <th className="py-2 px-4 border-b">Payment</th>
+                      <th className="py-2 px-4 border-b">Principal</th>
+                      <th className="py-2 px-4 border-b">Interest</th>
+                      <th className="py-2 px-4 border-b">Total Interest</th>
+                      <th className="py-2 px-4 border-b">Remaining Balance</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {getPaginatedData(traditionalSchedule).map((row, index) => (
+                      <tr key={index} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                        <td className="py-2 px-4 border-b text-center">{row.month}</td>
+                        <td className="py-2 px-4 border-b">{row.date}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.payment)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.principal)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.interest)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.totalInterest)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.balance)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              
+              {/* Pagination Controls */}
+              <PaginationControls schedule={traditionalSchedule} />
             </div>
           )}
 
@@ -755,7 +960,7 @@ function App() {
                   </p>
                 </div>
               </div>
-              <div className="h-80">
+              <div className="h-80 mb-6">
                 <Line 
                   data={{
                     labels: balanceChartData.labels,
@@ -813,6 +1018,42 @@ function App() {
                   }}
                 />
               </div>
+              
+              {/* Amortization Schedule */}
+              <h3 className="text-lg font-semibold text-gray-800 mb-3">Amortization Schedule</h3>
+              <div className="overflow-x-auto">
+                <table className="min-w-full bg-white border border-gray-200">
+                  <thead>
+                    <tr className="bg-gray-100">
+                      <th className="py-2 px-4 border-b">Month</th>
+                      <th className="py-2 px-4 border-b">Date</th>
+                      <th className="py-2 px-4 border-b">Base Payment</th>
+                      <th className="py-2 px-4 border-b">Extra Payment</th>
+                      <th className="py-2 px-4 border-b">Interest</th>
+                      <th className="py-2 px-4 border-b">Principal</th>
+                      <th className="py-2 px-4 border-b">Total Interest</th>
+                      <th className="py-2 px-4 border-b">Remaining Balance</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {getPaginatedData(extraPaymentSchedule).map((row, index) => (
+                      <tr key={index} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                        <td className="py-2 px-4 border-b text-center">{row.month}</td>
+                        <td className="py-2 px-4 border-b">{row.date}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.basePayment)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.extraPayment)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.interest)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.principalFromBase + row.principalFromExtra)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.totalInterest)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.balance)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              
+              {/* Pagination Controls */}
+              <PaginationControls schedule={extraPaymentSchedule} />
             </div>
           )}
 
@@ -846,7 +1087,7 @@ function App() {
                   </p>
                 </div>
               </div>
-              <div className="h-80">
+              <div className="h-80 mb-6">
                 <Line 
                   data={{
                     labels: balanceChartData.labels,
@@ -904,6 +1145,112 @@ function App() {
                   }}
                 />
               </div>
+              
+              {/* LOC Strategy Explanation */}
+              <div className="bg-yellow-50 p-4 rounded-lg mb-6">
+                <h3 className="text-lg font-semibold text-gray-800 mb-2">How the LOC Strategy Works</h3>
+                <ol className="list-decimal list-inside space-y-2 text-gray-700">
+                  <li>Take a chunk from your Line of Credit and apply it to your mortgage principal</li>
+                  <li>Make your regular mortgage payment each month</li>
+                  <li>Use your remaining cash flow to aggressively pay down the LOC</li>
+                  <li>Once the LOC is paid off, take another chunk and repeat the process</li>
+                </ol>
+                <p className="mt-3 text-sm text-gray-600">
+                  <b>Note:</b> The table below shows when chunks are applied (marked with ✓ in the "Chunk Applied" column).
+                </p>
+              </div>
+              
+              {/* Simplified Amortization Schedule */}
+              <h3 className="text-lg font-semibold text-gray-800 mb-3">Simplified LOC Schedule</h3>
+              <div className="overflow-x-auto">
+                <table className="min-w-full bg-white border border-gray-200">
+                  <thead>
+                    <tr className="bg-gray-100">
+                      <th className="py-2 px-4 border-b">Month</th>
+                      <th className="py-2 px-4 border-b">Date</th>
+                      <th className="py-2 px-4 border-b">Chunk Applied</th>
+                      <th className="py-2 px-4 border-b">Mortgage Balance</th>
+                      <th className="py-2 px-4 border-b">LOC Balance</th>
+                      <th className="py-2 px-4 border-b">Total Interest</th>
+                      <th className="py-2 px-4 border-b">Combined Debt</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {getPaginatedData(locSchedule).map((row, index) => (
+                      <tr key={index} className={row.chunkApplied ? 'bg-green-50' : (index % 2 === 0 ? 'bg-white' : 'bg-gray-50')}>
+                        <td className="py-2 px-4 border-b text-center">{row.month}</td>
+                        <td className="py-2 px-4 border-b">{row.date}</td>
+                        <td className="py-2 px-4 border-b text-center">{row.chunkApplied ? '✓' : ''}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.mortgageBalance)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.locBalance)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.totalInterest)}</td>
+                        <td className="py-2 px-4 border-b font-medium">
+                          {formatCurrency(row.mortgageBalance + row.locBalance)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              
+              {/* Pagination Controls */}
+              <PaginationControls schedule={locSchedule} />
+              
+              {/* Detailed LOC Amortization Schedule (Optional) */}
+              <div className="mt-8">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-lg font-semibold text-gray-800">Detailed LOC Schedule</h3>
+                  <button 
+                    onClick={() => {
+                      const detailsTable = document.getElementById('detailedLocTable');
+                      if (detailsTable) {
+                        detailsTable.classList.toggle('hidden');
+                      }
+                    }}
+                    className="px-3 py-1 bg-gray-200 rounded text-gray-700 hover:bg-gray-300"
+                  >
+                    Show/Hide Details
+                  </button>
+                </div>
+                <div id="detailedLocTable" className="overflow-x-auto hidden">
+                  <table className="min-w-full bg-white border border-gray-200">
+                    <thead>
+                      <tr className="bg-gray-100">
+                        <th className="py-2 px-4 border-b">Month</th>
+                        <th className="py-2 px-4 border-b">Date</th>
+                        <th className="py-2 px-4 border-b">Chunk Applied</th>
+                        <th className="py-2 px-4 border-b">Mortgage Payment</th>
+                        <th className="py-2 px-4 border-b">Mortgage Principal</th>
+                        <th className="py-2 px-4 border-b">Mortgage Interest</th>
+                        <th className="py-2 px-4 border-b">Mortgage Balance</th>
+                        <th className="py-2 px-4 border-b">LOC Payment</th>
+                        <th className="py-2 px-4 border-b">LOC Principal</th>
+                        <th className="py-2 px-4 border-b">LOC Interest</th>
+                        <th className="py-2 px-4 border-b">LOC Balance</th>
+                        <th className="py-2 px-4 border-b">Total Interest</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {getPaginatedData(locSchedule).map((row, index) => (
+                        <tr key={index} className={row.chunkApplied ? 'bg-green-50' : (index % 2 === 0 ? 'bg-white' : 'bg-gray-50')}>
+                          <td className="py-2 px-4 border-b text-center">{row.month}</td>
+                          <td className="py-2 px-4 border-b">{row.date}</td>
+                          <td className="py-2 px-4 border-b text-center">{row.chunkApplied ? '✓' : ''}</td>
+                          <td className="py-2 px-4 border-b">{formatCurrency(row.mortgagePayment)}</td>
+                          <td className="py-2 px-4 border-b">{formatCurrency(row.mortgagePrincipal)}</td>
+                          <td className="py-2 px-4 border-b">{formatCurrency(row.mortgageInterest)}</td>
+                          <td className="py-2 px-4 border-b">{formatCurrency(row.mortgageBalance)}</td>
+                          <td className="py-2 px-4 border-b">{formatCurrency(row.locPayment)}</td>
+                          <td className="py-2 px-4 border-b">{formatCurrency(row.locPrincipal)}</td>
+                          <td className="py-2 px-4 border-b">{formatCurrency(row.locInterest)}</td>
+                          <td className="py-2 px-4 border-b">{formatCurrency(row.locBalance)}</td>
+                          <td className="py-2 px-4 border-b">{formatCurrency(row.totalInterest)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -912,7 +1259,7 @@ function App() {
       {/* Footer */}
       <footer className="bg-gray-800 text-white py-6 mt-12">
         <div className="container mx-auto px-4 text-center">
-          <p>Loan Velocity Optimizer &copy; 2025. Compare mortgage strategies and save on interest.</p>
+          <p>Credit Velocity AI &copy; 2025. Compare mortgage strategies and save on interest.</p>
           <p className="text-gray-400 text-sm mt-2">
             Disclaimer: This calculator provides estimates for educational purposes only. 
             Please consult with a financial advisor before making financial decisions.
