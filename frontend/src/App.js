@@ -25,6 +25,11 @@ function App() {
   const [locInterestRate, setLocInterestRate] = useState(7.0);
   const [activeTab, setActiveTab] = useState('comparison');
   
+  // Budget growth settings
+  const [enableBudgetGrowth, setEnableBudgetGrowth] = useState(false);
+  const [annualIncomeGrowth, setAnnualIncomeGrowth] = useState(3.0);
+  const [annualExpenseGrowth, setAnnualExpenseGrowth] = useState(2.0);
+  
   // Calculated values
   const [monthlyPayment, setMonthlyPayment] = useState(0);
   const [extraPaymentAmount, setExtraPaymentAmount] = useState(0);
@@ -43,6 +48,9 @@ function App() {
   const [extraPaymentSchedule, setExtraPaymentSchedule] = useState([]);
   const [locSchedule, setLocSchedule] = useState([]);
   
+  // Income/expense growth projections
+  const [budgetProjection, setBudgetProjection] = useState([]);
+  
   // State for managing paginated tables
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(12); // Show 1 year at a time
@@ -57,6 +65,11 @@ function App() {
     labels: [],
     datasets: []
   });
+  
+  const [budgetChartData, setBudgetChartData] = useState({
+    labels: [],
+    datasets: []
+  });
 
   // Calculate monthly payment using standard mortgage formula
   const calculateMonthlyPayment = (principal, annualRate, years) => {
@@ -64,6 +77,82 @@ function App() {
     const numPayments = years * 12;
     if (monthlyRate === 0) return principal / numPayments;
     return principal * (monthlyRate * Math.pow(1 + monthlyRate, numPayments)) / (Math.pow(1 + monthlyRate, numPayments) - 1);
+  };
+  
+  // Calculate budget projections with growth
+  const calculateBudgetProjection = () => {
+    const years = Math.max(loanTerm, 40); // Project at least 40 years for comparison
+    const projection = [];
+    
+    let currentIncome = monthlyIncome;
+    let currentExpenses = monthlyExpenses;
+    let currentAvailable = currentIncome - currentExpenses;
+    
+    projection.push({
+      year: 0,
+      income: currentIncome,
+      expenses: currentExpenses,
+      available: currentAvailable
+    });
+    
+    // If growth is disabled, return a flat projection
+    if (!enableBudgetGrowth) {
+      for (let year = 1; year <= years; year++) {
+        projection.push({
+          year: year,
+          income: currentIncome,
+          expenses: currentExpenses,
+          available: currentAvailable
+        });
+      }
+      return projection;
+    }
+    
+    // Calculate growth with compounding
+    for (let year = 1; year <= years; year++) {
+      // Apply annual growth rates
+      currentIncome *= (1 + annualIncomeGrowth / 100);
+      currentExpenses *= (1 + annualExpenseGrowth / 100);
+      currentAvailable = currentIncome - currentExpenses;
+      
+      projection.push({
+        year: year,
+        income: currentIncome,
+        expenses: currentExpenses,
+        available: currentAvailable
+      });
+    }
+    
+    return projection;
+  };
+  
+  // Get income/expense values for a specific month considering growth
+  const getBudgetForMonth = (month) => {
+    if (!enableBudgetGrowth) {
+      return {
+        income: monthlyIncome,
+        expenses: monthlyExpenses,
+        available: monthlyIncome - monthlyExpenses
+      };
+    }
+    
+    // Convert month to year fraction for lookup
+    const year = Math.floor(month / 12);
+    const yearFraction = (month % 12) / 12;
+    
+    // Get the budget values for the surrounding years
+    const currentYearBudget = budgetProjection[Math.min(year, budgetProjection.length - 1)];
+    const nextYearBudget = budgetProjection[Math.min(year + 1, budgetProjection.length - 1)];
+    
+    // Interpolate between years for smoother growth
+    const income = currentYearBudget.income + (nextYearBudget.income - currentYearBudget.income) * yearFraction;
+    const expenses = currentYearBudget.expenses + (nextYearBudget.expenses - currentYearBudget.expenses) * yearFraction;
+    
+    return {
+      income: income,
+      expenses: expenses,
+      available: income - expenses
+    };
   };
 
   // Calculate results for traditional EMI payment with full amortization schedule
@@ -116,7 +205,6 @@ function App() {
     const monthlyRate = interestRate / 100 / 12;
     const numPayments = loanTerm * 12;
     const basePayment = calculateMonthlyPayment(loanAmount, interestRate, loanTerm);
-    const extraPayment = Math.max(0, monthlyIncome - monthlyExpenses - basePayment);
     
     let remainingBalance = loanAmount;
     let totalInterest = 0;
@@ -124,6 +212,10 @@ function App() {
     let schedule = [];
     
     for (let i = 1; i <= numPayments && remainingBalance > 0; i++) {
+      // Get the budget for this month (considers growth if enabled)
+      const budgetForMonth = getBudgetForMonth(i);
+      const extraPayment = Math.max(0, budgetForMonth.available - basePayment);
+      
       const interestForMonth = remainingBalance * monthlyRate;
       const principalFromBase = Math.min(basePayment - interestForMonth, remainingBalance);
       const principalFromExtra = Math.min(extraPayment, remainingBalance - principalFromBase);
@@ -146,7 +238,10 @@ function App() {
         interest: interestForMonth,
         totalInterest: totalInterest,
         balance: remainingBalance,
-        date: getDateAfterMonths(i)
+        date: getDateAfterMonths(i),
+        income: budgetForMonth.income,
+        expenses: budgetForMonth.expenses,
+        available: budgetForMonth.available
       });
       
       // If we've paid off the loan, break
@@ -155,12 +250,15 @@ function App() {
     
     setExtraPaymentSchedule(schedule);
     
+    // Get first month's extra payment for display
+    const extraPaymentAmount = schedule.length > 0 ? schedule[0].extraPayment : 0;
+    
     return {
       totalInterest,
       totalPayments: totalInterest + loanAmount,
       payoffMonths: schedule.length,
       balanceByMonth,
-      extraPaymentAmount: extraPayment
+      extraPaymentAmount
     };
   };
 
@@ -170,7 +268,6 @@ function App() {
     const locMonthlyRate = locInterestRate / 100 / 12;
     const numPayments = loanTerm * 12;
     const basePayment = calculateMonthlyPayment(loanAmount, interestRate, loanTerm);
-    const availableCashFlow = monthlyIncome - monthlyExpenses;
     
     let remainingBalance = loanAmount;
     let locBalance = 0;
@@ -189,6 +286,10 @@ function App() {
     }
     
     while (month <= numPayments && (remainingBalance > 0 || locBalance > 0)) {
+      // Get the budget for this month (considers growth if enabled)
+      const budgetForMonth = getBudgetForMonth(month);
+      const availableCashFlow = budgetForMonth.available;
+      
       // Calculate interest for both loans
       const mortgageInterestForMonth = remainingBalance * monthlyRate;
       const locInterestForMonth = locBalance * locMonthlyRate;
@@ -207,10 +308,10 @@ function App() {
       if (paycheckParking) {
         // Paycheck Parking Strategy
         // 1. Deposit entire paycheck to LOC (reduces LOC balance)
-        locPrincipalPayment = monthlyIncome;
+        locPrincipalPayment = budgetForMonth.income;
         
         // 2. Draw living expenses from LOC
-        locDraw = monthlyExpenses;
+        locDraw = budgetForMonth.expenses;
         
         // 3. Draw mortgage payment from LOC if needed
         locDraw += (mortgageInterestForMonth + principalForMonth);
@@ -269,7 +370,10 @@ function App() {
         locBalance: locBalance,
         totalOwed: remainingBalance + locBalance,
         chunkApplied: month === 1 ? chunkApplied : newChunkApplied,
-        totalInterest: totalInterest + locInterest
+        totalInterest: totalInterest + locInterest,
+        income: budgetForMonth.income,
+        expenses: budgetForMonth.expenses,
+        available: budgetForMonth.available
       });
       
       month++;
@@ -307,9 +411,47 @@ function App() {
     const startIndex = (currentPage - 1) * rowsPerPage;
     return schedule.slice(startIndex, startIndex + rowsPerPage);
   };
+  
+  // Create budget projection and chart
+  const updateBudgetProjection = () => {
+    const projection = calculateBudgetProjection();
+    setBudgetProjection(projection);
+    
+    // Create chart data from projection
+    const labels = projection.map(item => `Year ${item.year}`);
+    
+    const chartData = {
+      labels: labels,
+      datasets: [
+        {
+          label: 'Monthly Income',
+          data: projection.map(item => item.income),
+          borderColor: 'rgb(75, 192, 192)',
+          backgroundColor: 'rgba(75, 192, 192, 0.5)',
+        },
+        {
+          label: 'Monthly Expenses',
+          data: projection.map(item => item.expenses),
+          borderColor: 'rgb(255, 99, 132)',
+          backgroundColor: 'rgba(255, 99, 132, 0.5)',
+        },
+        {
+          label: 'Available for Loan Payment',
+          data: projection.map(item => item.available),
+          borderColor: 'rgb(53, 162, 235)',
+          backgroundColor: 'rgba(53, 162, 235, 0.5)',
+        }
+      ]
+    };
+    
+    setBudgetChartData(chartData);
+  };
 
   // Update calculations when inputs change
   useEffect(() => {
+    // Update budget projection first
+    updateBudgetProjection();
+    
     // Calculate base monthly payment
     const calculatedPayment = calculateMonthlyPayment(loanAmount, interestRate, loanTerm);
     setMonthlyPayment(calculatedPayment);
@@ -396,7 +538,20 @@ function App() {
         },
       ],
     });
-  }, [loanAmount, interestRate, loanTerm, monthlyIncome, monthlyExpenses, locLimit, locInterestRate, locChunkSize, paycheckParking]);
+  }, [
+    loanAmount, 
+    interestRate, 
+    loanTerm, 
+    monthlyIncome, 
+    monthlyExpenses, 
+    locLimit, 
+    locInterestRate, 
+    locChunkSize, 
+    paycheckParking,
+    enableBudgetGrowth,
+    annualIncomeGrowth,
+    annualExpenseGrowth
+  ]);
 
   // Pagination Component
   const PaginationControls = ({ schedule }) => {
@@ -537,6 +692,16 @@ function App() {
             >
               LOC Strategy
             </button>
+            <button
+              className={`mr-2 py-2 px-4 font-medium border-b-2 ${
+                activeTab === 'budget'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent hover:border-gray-300 text-gray-500 hover:text-gray-700'
+              }`}
+              onClick={() => setActiveTab('budget')}
+            >
+              Budget Planning
+            </button>
           </nav>
         </div>
 
@@ -623,7 +788,54 @@ function App() {
               />
             </div>
             
-            <div className="mt-6 pt-4 border-t border-gray-200">
+            {/* Budget Growth Settings */}
+            <div className="mt-4 mb-4">
+              <div className="flex items-center mb-2">
+                <input
+                  id="budgetGrowth"
+                  type="checkbox"
+                  checked={enableBudgetGrowth}
+                  onChange={(e) => setEnableBudgetGrowth(e.target.checked)}
+                  className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                />
+                <label htmlFor="budgetGrowth" className="ml-2 block text-sm font-medium text-gray-700">
+                  Enable Budget Growth
+                </label>
+              </div>
+              
+              {enableBudgetGrowth && (
+                <>
+                  <div className="ml-6 mb-3">
+                    <label htmlFor="incomeGrowth" className="block text-sm font-medium text-gray-700 mb-1">
+                      Annual Income Growth (%)
+                    </label>
+                    <input
+                      type="number"
+                      id="incomeGrowth"
+                      value={annualIncomeGrowth}
+                      onChange={(e) => setAnnualIncomeGrowth(Number(e.target.value))}
+                      step="0.1"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                  <div className="ml-6">
+                    <label htmlFor="expenseGrowth" className="block text-sm font-medium text-gray-700 mb-1">
+                      Annual Expense Growth (%)
+                    </label>
+                    <input
+                      type="number"
+                      id="expenseGrowth"
+                      value={annualExpenseGrowth}
+                      onChange={(e) => setAnnualExpenseGrowth(Number(e.target.value))}
+                      step="0.1"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+            
+            <div className="mt-3 pt-4 border-t border-gray-200">
               <div className="flex justify-between items-center mb-2">
                 <span className="text-sm font-medium text-gray-700">Available for Extra Payments:</span>
                 <span className="text-lg font-semibold text-green-600">${extraPaymentAmount.toFixed(2)}</span>
@@ -994,6 +1206,7 @@ function App() {
                 <p className="text-gray-700 mb-4">
                   This strategy involves making additional principal payments each month from your free cash flow, 
                   which reduces interest and shortens the loan term.
+                  {enableBudgetGrowth && " Your extra payments will increase over time as your income grows."}
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
                   <div className="bg-green-50 p-4 rounded-lg">
@@ -1001,7 +1214,7 @@ function App() {
                     <p className="text-2xl font-bold text-green-600">${monthlyPayment.toFixed(2)}</p>
                   </div>
                   <div className="bg-green-50 p-4 rounded-lg">
-                    <p className="text-sm text-gray-600">Extra Payment</p>
+                    <p className="text-sm text-gray-600">Initial Extra Payment</p>
                     <p className="text-2xl font-bold text-green-600">${extraPaymentAmount.toFixed(2)}</p>
                   </div>
                   <div className="bg-green-50 p-4 rounded-lg">
@@ -1079,8 +1292,8 @@ function App() {
                 />
               </div>
               
-              {/* Amortization Schedule */}
-              <h3 className="text-lg font-semibold text-gray-800 mb-3">Amortization Schedule</h3>
+              {/* Amortization Schedule with Income/Expense Growth */}
+              <h3 className="text-lg font-semibold text-gray-800 mb-3">Amortization Schedule {enableBudgetGrowth && " with Income Growth"}</h3>
               <div className="overflow-x-auto">
                 <table className="min-w-full bg-white border border-gray-200">
                   <thead>
@@ -1091,8 +1304,13 @@ function App() {
                       <th className="py-2 px-4 border-b">Extra Payment</th>
                       <th className="py-2 px-4 border-b">Interest</th>
                       <th className="py-2 px-4 border-b">Principal</th>
-                      <th className="py-2 px-4 border-b">Total Interest</th>
                       <th className="py-2 px-4 border-b">Remaining Balance</th>
+                      {enableBudgetGrowth && (
+                        <>
+                          <th className="py-2 px-4 border-b">Income</th>
+                          <th className="py-2 px-4 border-b">Expenses</th>
+                        </>
+                      )}
                     </tr>
                   </thead>
                   <tbody>
@@ -1104,8 +1322,13 @@ function App() {
                         <td className="py-2 px-4 border-b">{formatCurrency(row.extraPayment)}</td>
                         <td className="py-2 px-4 border-b">{formatCurrency(row.interest)}</td>
                         <td className="py-2 px-4 border-b">{formatCurrency(row.principalFromBase + row.principalFromExtra)}</td>
-                        <td className="py-2 px-4 border-b">{formatCurrency(row.totalInterest)}</td>
                         <td className="py-2 px-4 border-b">{formatCurrency(row.balance)}</td>
+                        {enableBudgetGrowth && (
+                          <>
+                            <td className="py-2 px-4 border-b">{formatCurrency(row.income)}</td>
+                            <td className="py-2 px-4 border-b">{formatCurrency(row.expenses)}</td>
+                          </>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -1125,6 +1348,7 @@ function App() {
                 <p className="text-gray-700 mb-4">
                   The LOC strategy (also known as Velocity Banking) involves using a line of credit to make 
                   large lump sum payments on your mortgage, then aggressively paying down the LOC with your monthly income.
+                  {enableBudgetGrowth && " With income growth enabled, your ability to pay down the LOC increases over time."}
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
                   <div className="bg-red-50 p-4 rounded-lg">
@@ -1325,6 +1549,12 @@ function App() {
                         <th className="py-2 px-2 border-b">LOC Prin. Balance</th>
                         <th className="py-2 px-2 border-b">LOC Paid</th>
                         <th className="py-2 px-2 border-b">Total Interest</th>
+                        {enableBudgetGrowth && (
+                          <>
+                            <th className="py-2 px-2 border-b">Income</th>
+                            <th className="py-2 px-2 border-b">Expenses</th>
+                          </>
+                        )}
                       </tr>
                     </thead>
                     <tbody>
@@ -1337,10 +1567,206 @@ function App() {
                           <td className="py-2 px-2 border-b">{formatCurrency(row.locPrinBalance)}</td>
                           <td className="py-2 px-2 border-b">{formatCurrency(row.locPaid)}</td>
                           <td className="py-2 px-2 border-b">{formatCurrency(row.totalInterest)}</td>
+                          {enableBudgetGrowth && (
+                            <>
+                              <td className="py-2 px-2 border-b">{formatCurrency(row.income)}</td>
+                              <td className="py-2 px-2 border-b">{formatCurrency(row.expenses)}</td>
+                            </>
+                          )}
                         </tr>
                       ))}
                     </tbody>
                   </table>
+                </div>
+              </div>
+            </div>
+          )}
+          
+          {/* Budget Planning Tab */}
+          {activeTab === 'budget' && (
+            <div className="bg-white rounded-lg shadow-md p-6">
+              <h2 className="text-xl font-semibold mb-4 text-gray-800">Budget Planning & Growth Projections</h2>
+              
+              <div className="mb-6">
+                <p className="text-gray-700 mb-4">
+                  This section helps you visualize how your budget changes over time with the income and expense growth rates you've specified.
+                  A growing income can significantly accelerate your loan payoff strategies.
+                </p>
+                
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                  <div className="bg-purple-50 p-4 rounded-lg">
+                    <p className="text-sm text-gray-600">Current Monthly Income</p>
+                    <p className="text-2xl font-bold text-purple-600">${monthlyIncome.toFixed(2)}</p>
+                  </div>
+                  <div className="bg-purple-50 p-4 rounded-lg">
+                    <p className="text-sm text-gray-600">Current Monthly Expenses</p>
+                    <p className="text-2xl font-bold text-purple-600">${monthlyExpenses.toFixed(2)}</p>
+                  </div>
+                  <div className="bg-purple-50 p-4 rounded-lg">
+                    <p className="text-sm text-gray-600">Current Available Cash</p>
+                    <p className="text-2xl font-bold text-purple-600">${(monthlyIncome - monthlyExpenses).toFixed(2)}</p>
+                  </div>
+                </div>
+                
+                <div className="bg-yellow-50 p-4 rounded-lg mb-6">
+                  <h3 className="text-lg font-semibold text-gray-800 mb-3">Budget Growth Settings</h3>
+                  
+                  <div className="flex items-center mb-3">
+                    <input
+                      id="budgetGrowthToggle"
+                      type="checkbox"
+                      checked={enableBudgetGrowth}
+                      onChange={(e) => setEnableBudgetGrowth(e.target.checked)}
+                      className="h-5 w-5 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                    />
+                    <label htmlFor="budgetGrowthToggle" className="ml-2 block text-lg font-medium text-gray-700">
+                      Enable Budget Growth Projections
+                    </label>
+                  </div>
+                  
+                  {enableBudgetGrowth && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
+                      <div>
+                        <label htmlFor="incomeGrowthRate" className="block text-sm font-medium text-gray-700 mb-1">
+                          Annual Income Growth Rate (%)
+                        </label>
+                        <input
+                          type="number"
+                          id="incomeGrowthRate"
+                          value={annualIncomeGrowth}
+                          onChange={(e) => setAnnualIncomeGrowth(Number(e.target.value))}
+                          step="0.1"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                        />
+                        <p className="mt-1 text-sm text-gray-500">
+                          Average annual salary increase in the US is 3-5%.
+                        </p>
+                      </div>
+                      <div>
+                        <label htmlFor="expenseGrowthRate" className="block text-sm font-medium text-gray-700 mb-1">
+                          Annual Expense Growth Rate (%)
+                        </label>
+                        <input
+                          type="number"
+                          id="expenseGrowthRate"
+                          value={annualExpenseGrowth}
+                          onChange={(e) => setAnnualExpenseGrowth(Number(e.target.value))}
+                          step="0.1"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                        />
+                        <p className="mt-1 text-sm text-gray-500">
+                          Average annual inflation rate is around 2-3%.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              
+              {/* Budget Growth Chart */}
+              <h3 className="text-lg font-semibold text-gray-800 mb-3">
+                {enableBudgetGrowth ? 'Budget Growth Projection' : 'Budget Projection (Fixed)'}
+              </h3>
+              <div className="h-96 mb-6">
+                <Line 
+                  data={budgetChartData}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                      y: {
+                        beginAtZero: true,
+                        title: {
+                          display: true,
+                          text: 'Monthly Amount ($)'
+                        }
+                      }
+                    },
+                    plugins: {
+                      tooltip: {
+                        callbacks: {
+                          label: function(context) {
+                            let label = context.dataset.label || '';
+                            if (label) {
+                              label += ': ';
+                            }
+                            if (context.parsed.y !== null) {
+                              label += '$' + context.parsed.y.toFixed(2);
+                            }
+                            return label;
+                          }
+                        }
+                      },
+                      legend: {
+                        position: 'top',
+                      },
+                      title: {
+                        display: true,
+                        text: enableBudgetGrowth 
+                          ? `Budget Projection with Growth (Income: ${annualIncomeGrowth}%, Expenses: ${annualExpenseGrowth}%)`
+                          : 'Budget Projection (No Growth)'
+                      },
+                    }
+                  }}
+                />
+              </div>
+              
+              {/* Budget Projection Table */}
+              <h3 className="text-lg font-semibold text-gray-800 mb-3">Budget Projection by Year</h3>
+              <div className="overflow-x-auto">
+                <table className="min-w-full bg-white border border-gray-200">
+                  <thead>
+                    <tr className="bg-gray-100">
+                      <th className="py-2 px-4 border-b">Year</th>
+                      <th className="py-2 px-4 border-b">Monthly Income</th>
+                      <th className="py-2 px-4 border-b">Monthly Expenses</th>
+                      <th className="py-2 px-4 border-b">Available Cash</th>
+                      <th className="py-2 px-4 border-b">Mortgage Payment</th>
+                      <th className="py-2 px-4 border-b">Extra Payment Capacity</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {budgetProjection.slice(0, 30).map((row, index) => (
+                      <tr key={index} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                        <td className="py-2 px-4 border-b text-center">{row.year}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.income)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.expenses)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(row.available)}</td>
+                        <td className="py-2 px-4 border-b">{formatCurrency(monthlyPayment)}</td>
+                        <td className="py-2 px-4 border-b font-medium">
+                          {formatCurrency(Math.max(0, row.available - monthlyPayment))}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              
+              <div className="mt-6">
+                <h3 className="text-lg font-semibold text-gray-800 mb-3">Impact on Loan Payoff</h3>
+                <p className="text-gray-700 mb-4">
+                  {enableBudgetGrowth 
+                    ? "With budget growth enabled, your loan payoff calculations reflect your increasing income over time. As your income grows, your ability to make extra payments increases, potentially accelerating your loan payoff."
+                    : "Budget growth is currently disabled. Your loan calculations assume your income and expenses will remain constant over the entire loan term."
+                  }
+                </p>
+                
+                <div className="bg-blue-50 p-4 rounded-lg">
+                  <h4 className="font-semibold text-gray-800 mb-2">Payoff Time Comparison</h4>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <p className="text-sm text-gray-600">Traditional EMI</p>
+                      <p className="text-xl font-bold text-blue-600">{(traditionalResults.payoffMonths / 12).toFixed(1)} years</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Extra Payment</p>
+                      <p className="text-xl font-bold text-green-600">{(extraPaymentResults.payoffMonths / 12).toFixed(1)} years</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">LOC Strategy</p>
+                      <p className="text-xl font-bold text-red-600">{(locResults.payoffMonths / 12).toFixed(1)} years</p>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
