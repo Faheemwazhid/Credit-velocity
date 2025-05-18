@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from "react";
 import "./App.css";
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
+import { jsPDF } from 'jspdf';
+import 'jspdf-autotable';
 
 ChartJS.register(
   CategoryScale,
@@ -40,6 +42,9 @@ function App() {
   
   // Simplified LOC table view
   const [simplifiedLocView, setSimplifiedLocView] = useState(true);
+  
+  // PDF export loading state
+  const [exportingPdf, setExportingPdf] = useState(false);
 
   // Results for each strategy
   const [traditionalResults, setTraditionalResults] = useState({ totalInterest: 0, totalPayments: 0, payoffMonths: 0 });
@@ -74,6 +79,25 @@ function App() {
     labels: [],
     datasets: []
   });
+  
+  // Color scheme update: Change LOC color from red to green
+  const chartColors = {
+    traditional: {
+      border: 'rgb(53, 162, 235)',
+      background: 'rgba(53, 162, 235, 0.5)',
+      solid: 'rgba(53, 162, 235, 0.7)'
+    },
+    extraPayment: {
+      border: 'rgb(255, 159, 64)',
+      background: 'rgba(255, 159, 64, 0.5)',
+      solid: 'rgba(255, 159, 64, 0.7)'
+    },
+    loc: {
+      border: 'rgb(75, 192, 192)',
+      background: 'rgba(75, 192, 192, 0.5)',
+      solid: 'rgba(75, 192, 192, 0.7)'
+    }
+  };
 
   // Calculate monthly payment using standard mortgage formula
   const calculateMonthlyPayment = (principal, annualRate, years) => {
@@ -358,6 +382,10 @@ function App() {
           locBalance = Math.max(0, locBalance + locInterestForMonth - locPayment);
         }
         
+        // Calculate the exact LOC interest for both methods consistently
+        // The interest is calculated on the beginning balance for the month
+        locInterest += locInterestForMonth;
+        
         // End balance for simplified table
         let endLocBalance = locBalance;
         
@@ -381,7 +409,9 @@ function App() {
           expensesWithdrawn: expensesWithdrawn,
           endLocBalance: endLocBalance,
           locInterest: locInterestForMonth,
-          newChunkApplied: newChunkApplied
+          newChunkApplied: newChunkApplied,
+          loanBalance: remainingBalance,
+          totalInterest: totalInterest + locInterest
         });
       } else {
         // Regular Extra Payment Strategy
@@ -392,15 +422,17 @@ function App() {
         locPrincipalPayment = Math.max(0, locPayment - locInterestForMonth);
         locBalance = Math.max(0, locBalance + locInterestForMonth - locPayment);
         
+        // Calculate the exact LOC interest consistently
+        locInterest += locInterestForMonth;
+        
         // Apply another chunk if LOC is paid off and there's room
         if (locBalance === 0 && remainingBalance > locChunkSize && locChunkSize <= locLimit) {
+          loanPayment = locChunkSize;
           remainingBalance -= locChunkSize;
           locBalance = locChunkSize;
           newChunkApplied = true;
         }
       }
-      
-      locInterest += locInterestForMonth;
       
       balanceByMonth.push(remainingBalance);
       
@@ -502,6 +534,202 @@ function App() {
     setBudgetChartData(chartData);
   };
 
+  // Export to PDF functionality
+  const exportToPdf = (strategy) => {
+    setExportingPdf(true);
+    
+    setTimeout(() => {
+      try {
+        const doc = new jsPDF('landscape');
+        
+        // Set title and add header
+        let title = '';
+        let schedule = [];
+        let strategyResults = {};
+        
+        if (strategy === 'traditional') {
+          title = 'Traditional EMI Amortization Schedule';
+          schedule = traditionalSchedule;
+          strategyResults = traditionalResults;
+        } else if (strategy === 'extraPayment') {
+          title = 'Extra Payment Amortization Schedule';
+          schedule = extraPaymentSchedule;
+          strategyResults = extraPaymentResults;
+        } else if (strategy === 'loc') {
+          title = paycheckParking ? 
+            'Line of Credit (Paycheck Parking) Amortization Schedule' : 
+            'Line of Credit Amortization Schedule';
+          schedule = paycheckParking && simplifiedLocView ? simplifiedLocSchedule : locSchedule;
+          strategyResults = locResults;
+        }
+        
+        // Add title
+        doc.setFontSize(18);
+        doc.text(title, 14, 15);
+        
+        // Add loan details
+        doc.setFontSize(12);
+        doc.text('Loan Details:', 14, 25);
+        doc.text(`Loan Amount: $${loanAmount.toLocaleString()}`, 14, 32);
+        doc.text(`Interest Rate: ${interestRate}%`, 14, 39);
+        doc.text(`Loan Term: ${loanTerm} years`, 14, 46);
+        doc.text(`Monthly Payment: $${monthlyPayment.toFixed(2)}`, 14, 53);
+        
+        // Add results
+        doc.text('Results:', 120, 25);
+        doc.text(`Total Interest: $${strategyResults.totalInterest.toLocaleString(undefined, {maximumFractionDigits: 2})}`, 120, 32);
+        doc.text(`Payoff Time: ${(strategyResults.payoffMonths / 12).toFixed(1)} years`, 120, 39);
+        
+        if (strategy !== 'traditional') {
+          doc.text(`Interest Savings: $${(traditionalResults.totalInterest - strategyResults.totalInterest).toLocaleString(undefined, {maximumFractionDigits: 2})}`, 120, 46);
+        }
+        
+        // Add LOC details if applicable
+        if (strategy === 'loc') {
+          doc.text('Line of Credit Details:', 220, 25);
+          doc.text(`LOC Limit: $${locLimit.toLocaleString()}`, 220, 32);
+          doc.text(`LOC Interest Rate: ${locInterestRate}%`, 220, 39);
+          doc.text(`LOC Chunk Size: $${locChunkSize.toLocaleString()}`, 220, 46);
+          doc.text(`Paycheck Parking: ${paycheckParking ? 'Enabled' : 'Disabled'}`, 220, 53);
+        }
+        
+        // Add date
+        doc.setFontSize(10);
+        doc.text(`Generated on: ${new Date().toLocaleDateString()}`, 14, 60);
+        
+        // Define table columns based on the strategy
+        let columns = [];
+        
+        if (strategy === 'traditional') {
+          columns = [
+            { header: 'Month', dataKey: 'month' },
+            { header: 'Date', dataKey: 'date' },
+            { header: 'Payment', dataKey: 'payment' },
+            { header: 'Principal', dataKey: 'principal' },
+            { header: 'Interest', dataKey: 'interest' },
+            { header: 'Total Interest', dataKey: 'totalInterest' },
+            { header: 'Balance', dataKey: 'balance' }
+          ];
+        } else if (strategy === 'extraPayment') {
+          columns = [
+            { header: 'Month', dataKey: 'month' },
+            { header: 'Date', dataKey: 'date' },
+            { header: 'Base Payment', dataKey: 'basePayment' },
+            { header: 'Extra Payment', dataKey: 'extraPayment' },
+            { header: 'Interest', dataKey: 'interest' },
+            { header: 'Principal', dataKey: 'principalTotal' },
+            { header: 'Total Interest', dataKey: 'totalInterest' },
+            { header: 'Balance', dataKey: 'balance' }
+          ];
+        } else if (strategy === 'loc' && paycheckParking && simplifiedLocView) {
+          columns = [
+            { header: 'Month', dataKey: 'month' },
+            { header: 'Date', dataKey: 'date' },
+            { header: 'Starting LOC Bal', dataKey: 'startLocBalance' },
+            { header: 'Payment to Loan', dataKey: 'loanPayment' },
+            { header: 'LOC Bal After Pay', dataKey: 'afterPayLocBalance' },
+            { header: 'Salary Added', dataKey: 'salaryAdded' },
+            { header: 'Expenses + EMI', dataKey: 'expensesWithdrawn' },
+            { header: 'Final LOC Bal', dataKey: 'endLocBalance' },
+            { header: 'LOC Interest', dataKey: 'locInterest' },
+            { header: 'Loan Balance', dataKey: 'loanBalance' }
+          ];
+        } else if (strategy === 'loc') {
+          columns = [
+            { header: 'Month', dataKey: 'pmtNo' },
+            { header: 'Mortgage Payment', dataKey: 'payment' },
+            { header: 'Principal Paid', dataKey: 'principalPaid' },
+            { header: 'Mortgage Balance', dataKey: 'balance' },
+            { header: 'LOC Payment', dataKey: 'locPayment' },
+            { header: 'LOC Draw', dataKey: 'draw' },
+            { header: 'LOC Balance', dataKey: 'locBalance' },
+            { header: 'Total Owed', dataKey: 'totalOwed' },
+            { header: 'Chunk Applied', dataKey: 'chunkAppliedText' }
+          ];
+        }
+        
+        // Format data for the table
+        let data = [];
+        
+        if (strategy === 'traditional') {
+          data = schedule.map(row => ({
+            ...row,
+            payment: formatCurrency(row.payment),
+            principal: formatCurrency(row.principal),
+            interest: formatCurrency(row.interest),
+            totalInterest: formatCurrency(row.totalInterest),
+            balance: formatCurrency(row.balance)
+          }));
+        } else if (strategy === 'extraPayment') {
+          data = schedule.map(row => ({
+            ...row,
+            basePayment: formatCurrency(row.basePayment),
+            extraPayment: formatCurrency(row.extraPayment),
+            interest: formatCurrency(row.interest),
+            principalTotal: formatCurrency(row.principalFromBase + row.principalFromExtra),
+            totalInterest: formatCurrency(row.totalInterest),
+            balance: formatCurrency(row.balance)
+          }));
+        } else if (strategy === 'loc' && paycheckParking && simplifiedLocView) {
+          data = schedule.map(row => ({
+            ...row,
+            startLocBalance: formatCurrency(row.startLocBalance),
+            loanPayment: row.loanPayment > 0 ? `-${formatCurrency(row.loanPayment)}` : '',
+            afterPayLocBalance: formatCurrency(row.afterPayLocBalance),
+            salaryAdded: `+${formatCurrency(row.salaryAdded)}`,
+            expensesWithdrawn: `-${formatCurrency(row.expensesWithdrawn)}`,
+            endLocBalance: formatCurrency(row.endLocBalance),
+            locInterest: formatCurrency(row.locInterest),
+            loanBalance: formatCurrency(row.loanBalance || 0)
+          }));
+        } else if (strategy === 'loc') {
+          data = schedule.map(row => ({
+            ...row,
+            payment: formatCurrency(row.payment),
+            principalPaid: formatCurrency(row.principalPaid),
+            balance: formatCurrency(row.balance),
+            locPayment: formatCurrency(row.locPayment),
+            draw: formatCurrency(row.draw),
+            locBalance: formatCurrency(row.locBalance),
+            totalOwed: formatCurrency(row.totalOwed),
+            chunkAppliedText: row.chunkApplied ? '✓' : ''
+          }));
+        }
+        
+        // Add table to document
+        doc.autoTable({
+          startY: 70,
+          head: [columns.map(col => col.header)],
+          body: data.map(row => columns.map(col => row[col.dataKey])),
+          theme: 'striped',
+          headStyles: { fillColor: [41, 128, 185], textColor: 255 },
+          margin: { top: 70 },
+          styles: { overflow: 'linebreak' },
+          columnStyles: { 
+            text: { cellWidth: 'auto' }
+          }
+        });
+        
+        // Add footer
+        const pageCount = doc.internal.getNumberOfPages();
+        for (let i = 1; i <= pageCount; i++) {
+          doc.setPage(i);
+          doc.setFontSize(10);
+          doc.text('Credit Velocity AI - This report is for informational purposes only. Consult a financial advisor before making decisions.', 14, doc.internal.pageSize.height - 10);
+          doc.text(`Page ${i} of ${pageCount}`, doc.internal.pageSize.width - 40, doc.internal.pageSize.height - 10);
+        }
+        
+        // Download the PDF
+        doc.save(`${title.toLowerCase().replace(/\s+/g, '_')}.pdf`);
+      } catch (error) {
+        console.error('Error generating PDF:', error);
+        alert('There was an error generating the PDF. Please try again.');
+      } finally {
+        setExportingPdf(false);
+      }
+    }, 100);
+  };
+
   // Update calculations when inputs change
   useEffect(() => {
     // Update budget projection first
@@ -547,49 +775,49 @@ function App() {
     const extraPaymentBalance = extraPayment.balanceByMonth.concat(Array(maxMonths - extraPayment.balanceByMonth.length).fill(0));
     const locBalance = loc.balanceByMonth.concat(Array(maxMonths - loc.balanceByMonth.length).fill(0));
     
-    // Update balance chart data
+    // Update balance chart data with new color scheme
     setBalanceChartData({
       labels: labels,
       datasets: [
         {
           label: 'Traditional EMI',
           data: traditionalBalance,
-          borderColor: 'rgb(53, 162, 235)',
-          backgroundColor: 'rgba(53, 162, 235, 0.5)',
+          borderColor: chartColors.traditional.border,
+          backgroundColor: chartColors.traditional.background,
         },
         {
           label: 'Extra Payment',
           data: extraPaymentBalance,
-          borderColor: 'rgb(75, 192, 192)',
-          backgroundColor: 'rgba(75, 192, 192, 0.5)',
+          borderColor: chartColors.extraPayment.border,
+          backgroundColor: chartColors.extraPayment.background,
         },
         {
           label: 'LOC Strategy',
           data: locBalance,
-          borderColor: 'rgb(255, 99, 132)',
-          backgroundColor: 'rgba(255, 99, 132, 0.5)',
+          borderColor: chartColors.loc.border,
+          backgroundColor: chartColors.loc.background,
         },
       ],
     });
     
-    // Update comparison chart data
+    // Update comparison chart data with new color scheme
     setComparisonChartData({
       labels: ['Total Interest', 'Payoff Time (Years)'],
       datasets: [
         {
           label: 'Traditional EMI',
           data: [traditional.totalInterest, traditional.payoffMonths / 12],
-          backgroundColor: 'rgba(53, 162, 235, 0.7)',
+          backgroundColor: chartColors.traditional.solid,
         },
         {
           label: 'Extra Payment',
           data: [extraPayment.totalInterest, extraPayment.payoffMonths / 12],
-          backgroundColor: 'rgba(75, 192, 192, 0.7)',
+          backgroundColor: chartColors.extraPayment.solid,
         },
         {
           label: 'LOC Strategy',
           data: [loc.totalInterest, loc.payoffMonths / 12],
-          backgroundColor: 'rgba(255, 99, 132, 0.7)',
+          backgroundColor: chartColors.loc.solid,
         },
       ],
     });
@@ -681,6 +909,32 @@ function App() {
       maximumFractionDigits: 2
     }).format(value);
   };
+  
+  // Export to PDF Button Component
+  const ExportButton = ({ strategy }) => (
+    <button
+      onClick={() => exportToPdf(strategy)}
+      disabled={exportingPdf}
+      className="ml-2 px-3 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 flex items-center"
+    >
+      {exportingPdf ? (
+        <>
+          <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          Exporting...
+        </>
+      ) : (
+        <>
+          <svg className="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+            <path fillRule="evenodd" d="M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V7.414A2 2 0 0015.414 6L12 2.586A2 2 0 0010.586 2H6zm5 6a1 1 0 10-2 0v3.586l-1.293-1.293a1 1 0 10-1.414 1.414l3 3a1 1 0 001.414 0l3-3a1 1 0 00-1.414-1.414L11 11.586V8z" clipRule="evenodd"></path>
+          </svg>
+          Export PDF
+        </>
+      )}
+    </button>
+  );
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -1092,41 +1346,41 @@ function App() {
                 </div>
                 
                 {/* Extra Payment */}
-                <div className="bg-white rounded-lg shadow-md p-4 border-l-4 border-green-500">
+                <div className="bg-white rounded-lg shadow-md p-4 border-l-4 border-orange-500">
                   <h3 className="text-lg font-semibold text-gray-800 mb-2">Extra Payment</h3>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <p className="text-sm text-gray-600">Total Interest</p>
-                      <p className="text-xl font-bold text-green-600">${extraPaymentResults.totalInterest.toFixed(2)}</p>
+                      <p className="text-xl font-bold text-orange-600">${extraPaymentResults.totalInterest.toFixed(2)}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600">Payoff Time</p>
-                      <p className="text-xl font-bold text-green-600">{(extraPaymentResults.payoffMonths / 12).toFixed(1)} years</p>
+                      <p className="text-xl font-bold text-orange-600">{(extraPaymentResults.payoffMonths / 12).toFixed(1)} years</p>
                     </div>
                     <div className="col-span-2">
                       <p className="text-sm text-gray-600">Interest Savings</p>
-                      <p className="text-lg font-bold text-green-600">
+                      <p className="text-lg font-bold text-orange-600">
                         ${(traditionalResults.totalInterest - extraPaymentResults.totalInterest).toFixed(2)}
                       </p>
                     </div>
                   </div>
                 </div>
                 
-                {/* LOC Strategy */}
-                <div className="bg-white rounded-lg shadow-md p-4 border-l-4 border-red-500">
+                {/* LOC Strategy - Changed to Green */}
+                <div className="bg-white rounded-lg shadow-md p-4 border-l-4 border-green-500">
                   <h3 className="text-lg font-semibold text-gray-800 mb-2">LOC Strategy</h3>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <p className="text-sm text-gray-600">Total Interest</p>
-                      <p className="text-xl font-bold text-red-600">${locResults.totalInterest.toFixed(2)}</p>
+                      <p className="text-xl font-bold text-green-600">${locResults.totalInterest.toFixed(2)}</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600">Payoff Time</p>
-                      <p className="text-xl font-bold text-red-600">{(locResults.payoffMonths / 12).toFixed(1)} years</p>
+                      <p className="text-xl font-bold text-green-600">{(locResults.payoffMonths / 12).toFixed(1)} years</p>
                     </div>
                     <div className="col-span-2">
                       <p className="text-sm text-gray-600">Interest Savings</p>
-                      <p className="text-lg font-bold text-red-600">
+                      <p className="text-lg font-bold text-green-600">
                         ${(traditionalResults.totalInterest - locResults.totalInterest).toFixed(2)}
                       </p>
                     </div>
@@ -1139,7 +1393,10 @@ function App() {
           {/* Traditional EMI Tab */}
           {activeTab === 'traditional' && (
             <div className="bg-white rounded-lg shadow-md p-6">
-              <h2 className="text-xl font-semibold mb-4 text-gray-800">Traditional EMI Payment</h2>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-semibold text-gray-800">Traditional EMI Payment</h2>
+                <ExportButton strategy="traditional" />
+              </div>
               <div className="mb-6">
                 <p className="text-gray-700 mb-4">
                   This is the standard mortgage amortization schedule. Monthly payments remain fixed for the duration of the loan term.
@@ -1256,7 +1513,10 @@ function App() {
           {/* Extra Payment Tab */}
           {activeTab === 'extra' && (
             <div className="bg-white rounded-lg shadow-md p-6">
-              <h2 className="text-xl font-semibold mb-4 text-gray-800">Extra Payment Strategy</h2>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-semibold text-gray-800">Extra Payment Strategy</h2>
+                <ExportButton strategy="extraPayment" />
+              </div>
               <div className="mb-6">
                 <p className="text-gray-700 mb-4">
                   This strategy involves making additional principal payments each month from your free cash flow, 
@@ -1264,21 +1524,21 @@ function App() {
                   {enableBudgetGrowth && " Your extra payments will increase over time as your income grows."}
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-                  <div className="bg-green-50 p-4 rounded-lg">
+                  <div className="bg-orange-50 p-4 rounded-lg">
                     <p className="text-sm text-gray-600">Base Payment</p>
-                    <p className="text-2xl font-bold text-green-600">${monthlyPayment.toFixed(2)}</p>
+                    <p className="text-2xl font-bold text-orange-600">${monthlyPayment.toFixed(2)}</p>
                   </div>
-                  <div className="bg-green-50 p-4 rounded-lg">
+                  <div className="bg-orange-50 p-4 rounded-lg">
                     <p className="text-sm text-gray-600">Initial Extra Payment</p>
-                    <p className="text-2xl font-bold text-green-600">${extraPaymentAmount.toFixed(2)}</p>
+                    <p className="text-2xl font-bold text-orange-600">${extraPaymentAmount.toFixed(2)}</p>
                   </div>
-                  <div className="bg-green-50 p-4 rounded-lg">
+                  <div className="bg-orange-50 p-4 rounded-lg">
                     <p className="text-sm text-gray-600">Total Interest</p>
-                    <p className="text-2xl font-bold text-green-600">${extraPaymentResults.totalInterest.toFixed(2)}</p>
+                    <p className="text-2xl font-bold text-orange-600">${extraPaymentResults.totalInterest.toFixed(2)}</p>
                   </div>
-                  <div className="bg-green-50 p-4 rounded-lg">
+                  <div className="bg-orange-50 p-4 rounded-lg">
                     <p className="text-sm text-gray-600">Payoff Time</p>
-                    <p className="text-2xl font-bold text-green-600">{(extraPaymentResults.payoffMonths / 12).toFixed(1)} years</p>
+                    <p className="text-2xl font-bold text-orange-600">{(extraPaymentResults.payoffMonths / 12).toFixed(1)} years</p>
                   </div>
                 </div>
                 <div className="bg-blue-50 p-4 rounded-lg mb-6">
@@ -1398,7 +1658,10 @@ function App() {
           {/* LOC Strategy Tab */}
           {activeTab === 'loc' && (
             <div className="bg-white rounded-lg shadow-md p-6">
-              <h2 className="text-xl font-semibold mb-4 text-gray-800">Line of Credit (LOC) Strategy</h2>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-semibold text-gray-800">Line of Credit (LOC) Strategy</h2>
+                <ExportButton strategy="loc" />
+              </div>
               <div className="mb-6">
                 <p className="text-gray-700 mb-4">
                   The LOC strategy (also known as Velocity Banking) involves using a line of credit to make 
@@ -1406,21 +1669,21 @@ function App() {
                   {enableBudgetGrowth && " With income growth enabled, your ability to pay down the LOC increases over time."}
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-                  <div className="bg-red-50 p-4 rounded-lg">
+                  <div className="bg-green-50 p-4 rounded-lg">
                     <p className="text-sm text-gray-600">Chunk Size</p>
-                    <p className="text-2xl font-bold text-red-600">${locChunkSize.toFixed(2)}</p>
+                    <p className="text-2xl font-bold text-green-600">${locChunkSize.toFixed(2)}</p>
                   </div>
-                  <div className="bg-red-50 p-4 rounded-lg">
+                  <div className="bg-green-50 p-4 rounded-lg">
                     <p className="text-sm text-gray-600">LOC Interest Rate</p>
-                    <p className="text-2xl font-bold text-red-600">{locInterestRate.toFixed(2)}%</p>
+                    <p className="text-2xl font-bold text-green-600">{locInterestRate.toFixed(2)}%</p>
                   </div>
-                  <div className="bg-red-50 p-4 rounded-lg">
+                  <div className="bg-green-50 p-4 rounded-lg">
                     <p className="text-sm text-gray-600">Total Interest</p>
-                    <p className="text-2xl font-bold text-red-600">${locResults.totalInterest.toFixed(2)}</p>
+                    <p className="text-2xl font-bold text-green-600">${locResults.totalInterest.toFixed(2)}</p>
                   </div>
-                  <div className="bg-red-50 p-4 rounded-lg">
+                  <div className="bg-green-50 p-4 rounded-lg">
                     <p className="text-sm text-gray-600">Payoff Time</p>
-                    <p className="text-2xl font-bold text-red-600">{(locResults.payoffMonths / 12).toFixed(1)} years</p>
+                    <p className="text-2xl font-bold text-green-600">{(locResults.payoffMonths / 12).toFixed(1)} years</p>
                   </div>
                 </div>
                 <div className="bg-blue-50 p-4 rounded-lg mb-6">
@@ -1571,6 +1834,7 @@ function App() {
                           <th className="py-2 px-3 border-b">Expenses + EMI Withdrawn</th>
                           <th className="py-2 px-3 border-b">Final LOC Balance</th>
                           <th className="py-2 px-3 border-b">LOC Interest (approx)</th>
+                          <th className="py-2 px-3 border-b">Loan Balance</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1585,6 +1849,7 @@ function App() {
                             <td className="py-2 px-3 border-b">{`-${formatCurrency(row.expensesWithdrawn)}`}</td>
                             <td className="py-2 px-3 border-b font-medium">{formatCurrency(row.endLocBalance)}</td>
                             <td className="py-2 px-3 border-b">{formatCurrency(row.locInterest)}</td>
+                            <td className="py-2 px-3 border-b">{formatCurrency(row.loanBalance || 0)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -1876,11 +2141,11 @@ function App() {
                     </div>
                     <div>
                       <p className="text-sm text-gray-600">Extra Payment</p>
-                      <p className="text-xl font-bold text-green-600">{(extraPaymentResults.payoffMonths / 12).toFixed(1)} years</p>
+                      <p className="text-xl font-bold text-orange-600">{(extraPaymentResults.payoffMonths / 12).toFixed(1)} years</p>
                     </div>
                     <div>
                       <p className="text-sm text-gray-600">LOC Strategy</p>
-                      <p className="text-xl font-bold text-red-600">{(locResults.payoffMonths / 12).toFixed(1)} years</p>
+                      <p className="text-xl font-bold text-green-600">{(locResults.payoffMonths / 12).toFixed(1)} years</p>
                     </div>
                   </div>
                 </div>
